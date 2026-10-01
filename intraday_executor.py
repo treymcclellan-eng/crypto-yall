@@ -116,9 +116,19 @@ def compute_intraday_signals() -> dict:
 
 # ── Trade decisions ─────────────────────────────────────────────────────────
 
-def decide_trades(signals: dict, open_positions: dict, max_positions: int) -> list[dict]:
-    """Decide trades given new signals vs current HL positions."""
+def decide_trades(signals: dict, open_positions: dict, max_positions: int,
+                   all_open_positions: dict | None = None) -> list[dict]:
+    """Decide trades given new signals vs current HL positions.
+
+    `open_positions` is this bot's OWN tracked/owned positions (used for
+    closes). `all_open_positions` is every position currently open on the
+    exchange account, regardless of which bot owns it — used to avoid
+    opening a new position in a coin another bot already holds. Defaults
+    to `open_positions` for backward compatibility.
+    """
     trades = []
+    if all_open_positions is None:
+        all_open_positions = open_positions
 
     # Close out positions that should exit
     for ticker, info in signals.items():
@@ -145,11 +155,15 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int) -> li
     remaining = {c: p for c, p in open_positions.items() if c not in closes}
     slots = max_positions - len(remaining)
 
+    # Coins with an open position ANYWHERE on the account (any bot), minus
+    # coins we're closing ourselves this cycle (which frees that coin up).
+    all_open_coins = set(all_open_positions.keys()) - closes
+
     # Open new positions, prioritized by oscillator magnitude
     candidates = []
     for ticker, info in signals.items():
         hl_coin = HL_SYMBOL_MAP[ticker]
-        if hl_coin in remaining:
+        if hl_coin in remaining or hl_coin in all_open_coins:
             continue
         action = info["action"]
         # Open on fresh entry (buy/enter_short) OR sync when strategy
@@ -279,7 +293,8 @@ def main():
 
     managed_positions = {c: p for c, p in open_positions.items() if c in owned_coins}
 
-    trades = decide_trades(signals, managed_positions, max_positions)
+    trades = decide_trades(signals, managed_positions, max_positions,
+                            all_open_positions=open_positions)
     print(f"Decided on {len(trades)} intraday trade(s) (own {len(owned_coins)} position(s))")
 
     results = []

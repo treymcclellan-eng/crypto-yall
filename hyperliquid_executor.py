@@ -202,14 +202,23 @@ def compute_all_signals() -> dict:
 
 # ── Trade Decisions ─────────────────────────────────────────────────────────
 
-def decide_trades(signals: dict, open_positions: dict, max_positions: int) -> list[dict]:
+def decide_trades(signals: dict, open_positions: dict, max_positions: int,
+                   all_open_positions: dict | None = None) -> list[dict]:
     """
     Reconcile signals vs current positions and return list of trade intents.
+
+    `open_positions` is this bot's OWN tracked/owned positions (used for
+    closes). `all_open_positions` is every position currently open on the
+    exchange account, regardless of which bot owns it — used to avoid
+    opening a new position in a coin another bot already holds. Defaults
+    to `open_positions` for backward compatibility.
 
     Each intent: {ticker, hl_coin, action, side, reason}
     action: "open_long" | "open_short" | "close"
     """
     trades = []
+    if all_open_positions is None:
+        all_open_positions = open_positions
 
     # Step 1: Determine which current positions need to be closed
     for ticker, info in signals.items():
@@ -260,15 +269,20 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int) -> li
     }
     slots_available = max_positions - len(remaining_positions)
 
+    # Coins with an open position ANYWHERE on the account (any bot), minus
+    # coins we're closing ourselves this cycle (which frees that coin up).
+    all_open_coins = set(all_open_positions.keys()) - closes_by_coin
+
     # Candidate opens, sorted by confidence (highest first)
     open_candidates = []
     for ticker, info in signals.items():
         hl_coin = HL_TICKER_MAP[ticker]
         action_key = info["action"]
 
-        # Skip if we already have a position in the right direction
+        # Skip if we already have a position in the right direction, OR if
+        # ANY bot on this account already has an open position in this coin.
         existing = remaining_positions.get(hl_coin)
-        if existing:
+        if existing or hl_coin in all_open_coins:
             continue
 
         # Open on fresh entry (buy/enter_short) OR sync when strategy
@@ -572,7 +586,8 @@ def main():
 
     managed_positions = {c: p for c, p in open_positions.items() if c in owned_coins}
 
-    trades = decide_trades(signals, managed_positions, max_positions)
+    trades = decide_trades(signals, managed_positions, max_positions,
+                            all_open_positions=open_positions)
     print(f"Decided on {len(trades)} trade(s) (own {len(owned_coins)} position(s))")
 
     results = []
