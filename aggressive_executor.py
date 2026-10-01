@@ -122,9 +122,18 @@ def compute_aggressive_signals() -> dict:
 # ── Trade decisions ─────────────────────────────────────────────────────────
 
 def decide_trades(signals: dict, open_positions: dict, max_positions: int,
-                  pyramid_state: dict) -> list[dict]:
-    """Decide trades, including pyramid adds on existing winners."""
+                  pyramid_state: dict, all_open_positions: dict | None = None) -> list[dict]:
+    """Decide trades, including pyramid adds on existing winners.
+
+    `open_positions` is this bot's OWN tracked/owned positions (used for
+    closes and pyramid adds). `all_open_positions` is every position
+    currently open on the exchange account, regardless of which bot owns
+    it — used to avoid opening a new position in a coin another bot
+    already holds. Defaults to `open_positions` for backward compatibility.
+    """
     trades = []
+    if all_open_positions is None:
+        all_open_positions = open_positions
 
     # Close out positions that should exit
     for ticker, info in signals.items():
@@ -171,11 +180,15 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
 
     slots = max_positions - len(remaining)
 
+    # Coins with an open position ANYWHERE on the account (any bot), minus
+    # coins we're closing ourselves this cycle (which frees that coin up).
+    all_open_coins = set(all_open_positions.keys()) - closes
+
     # Open new positions, prioritized by oscillator magnitude
     candidates = []
     for ticker, info in signals.items():
         hl_coin = HL_SYMBOL_MAP[ticker]
-        if hl_coin in remaining:
+        if hl_coin in remaining or hl_coin in all_open_coins:
             continue
         action = info["action"]
         if action in ("buy", "hold_long"):
@@ -306,7 +319,8 @@ def main():
     # Per-coin pyramid state (persisted across runs)
     pyramid_state = state.get("pyramid_state", {})
 
-    trades = decide_trades(signals, managed_positions, max_positions, pyramid_state)
+    trades = decide_trades(signals, managed_positions, max_positions, pyramid_state,
+                            all_open_positions=open_positions)
     print(f"Decided on {len(trades)} aggressive trade(s) (own {len(owned_coins)} position(s))")
 
     results = []
