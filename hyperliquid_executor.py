@@ -127,8 +127,52 @@ def get_account_equity(info, address: str) -> float:
     return float(state["marginSummary"]["accountValue"])
 
 
+def _positions_from_fills(info, address: str) -> dict:
+    """Independent view of open positions, derived from recent fills.
+
+    Each fill carries `startPosition` (position before the fill) and a side
+    ("B" buy / "A" sell), so the latest fill per coin tells us the position
+    after it. This does not depend on the clearinghouse-state endpoint, so it
+    still works if that endpoint returns nothing for the account.
+    """
+    out = {}
+    try:
+        fills = info.user_fills(address)
+    except Exception as e:
+        print(f"WARNING: could not read fills for position cross-check: {e}")
+        return out
+
+    latest = {}
+    for f in fills:
+        coin = f.get("coin")
+        if not coin or coin.startswith("@") or "/" in coin:
+            continue  # spot fills
+        key = (int(f.get("time", 0)), int(f.get("tid", 0)))
+        if coin not in latest or key > latest[coin][0]:
+            latest[coin] = (key, f)
+
+    for coin, (_, f) in latest.items():
+        start = float(f.get("startPosition", 0))
+        sz = float(f["sz"])
+        after = round(start + sz if f.get("side") == "B" else start - sz, 8)
+        if abs(after) > 1e-9:
+            out[coin] = {
+                "size": after,  # signed: + long, - short
+                "entry_px": float(f.get("px", 0)),
+                "unrealized_pnl": 0.0,
+                "source": "fills",
+            }
+    return out
+
+
 def get_open_positions(info, address: str) -> dict:
-    """Return {coin: {size, entry_px, unrealized_pnl}} for open positions."""
+    """Return {coin: {size, entry_px, unrealized_pnl}} for open positions.
+
+    Reads the clearinghouse state, then cross-checks against recent fills.
+    Any coin that fills say we hold but the clearinghouse state omits is
+    added (with a loud warning) so the bots never think the account is flat
+    while it is not.
+    """
     state = info.user_state(address)
     positions = {}
     for p in state.get("assetPositions", []):
@@ -141,7 +185,59 @@ def get_open_positions(info, address: str) -> dict:
             "entry_px": float(pos["entryPx"]),
             "unrealized_pnl": float(pos["unrealizedPnl"]),
         }
+
+    from_fills = _positions_from_fills(info, address)
+    missing = {c: p for c, p in from_fills.items() if c not in positions}
+    if missing:
+        print(f"WARNING: clearinghouse state omitted {sorted(missing)} but recent "
+              f"fills show open positions — using fills-derived positions: "
+              f"{ {c: p['size'] for c, p in missing.items()} }")
+        positions.update(missing)
+    print(f"Open positions on account: { {c: p['size'] for c, p in positions.items()} }")
     return positions
+
+
+def close_position(info, exchange, coin: str, size: float, slippage: float = 0.05) -> dict:
+    """Close `size` (signed: + long, - short) with a reduce-only IOC order.
+
+    Unlike exchange.market_close(), this does not re-query the clearinghouse
+    state to find the position, so it works even when that read is empty.
+    """
+    is_buy = size < 0  # closing a short means buying
+    mid = get_mid_price(info, coin)
+    sz_decimals = get_size_decimals(info, coin)
+    px = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
+    px = round(float(f"{px:.5g}"), max(0, 6 - sz_decimals))
+    close_sz = round(abs(size), sz_decimals)
+    return exchange.order(
+        coin, is_buy, close_sz, px,
+        {"limit": {"tif": "Ioc"}}, reduce_only=True,
+    )
+
+
+def apply_exposure_cap(trades: list, positions: dict, equity: float, info,
+                       max_leverage: float | None = None) -> list:
+    """Drop all new opens/adds when account-wide gross leverage is too high.
+
+    Closes are always allowed. This is a backstop against runaway position
+    stacking, whatever the cause.
+    """
+    if max_leverage is None:
+        max_leverage = float(os.environ.get("MAX_ACCOUNT_LEVERAGE", "2.0"))
+    if equity <= 0:
+        print("WARNING: equity read as 0 — exposure cap not enforced")
+        return trades
+    mids = info.all_mids()
+    gross = sum(abs(p["size"]) * float(mids.get(c, p["entry_px"]))
+                for c, p in positions.items())
+    lev = gross / equity
+    if lev <= max_leverage:
+        return trades
+    kept = [t for t in trades if t["action"] == "close"]
+    dropped = len(trades) - len(kept)
+    print(f"EXPOSURE CAP: account leverage {lev:.2f}x exceeds {max_leverage:.2f}x — "
+          f"blocking {dropped} open/add trade(s); closes still allowed")
+    return kept
 
 
 def get_mid_price(info, coin: str) -> float:
@@ -232,25 +328,19 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
         is_long = current_pos["size"] > 0
         is_short = current_pos["size"] < 0
 
-        # Close conditions
+        # Close conditions are LEVEL-based: if we hold a position that the
+        # strategy no longer wants, close it. (The old edge-based check only
+        # fired on the single bar where the signal changed, so one skipped
+        # run left the position open forever.)
+        sig_val = info.get("signal", 0)
         should_close = False
         reason = ""
-        if action_key == "sell_exit" and is_long:
+        if is_long and sig_val != 1:
             should_close = True
-            reason = "SELL / EXIT signal"
-        elif action_key == "liquidate" and (is_long or is_short):
+            reason = f"Strategy no longer long ({action_key})"
+        elif is_short and sig_val != -1:
             should_close = True
-            reason = "LIQUIDATE TO CASH signal"
-        elif action_key == "cover_short" and is_short:
-            should_close = True
-            reason = "COVER SHORT signal"
-        # If signal flipped direction, close existing
-        elif action_key == "buy" and is_short:
-            should_close = True
-            reason = "Signal flipped long while short"
-        elif action_key == "enter_short" and is_long:
-            should_close = True
-            reason = "Signal flipped short while long"
+            reason = f"Strategy no longer short ({action_key})"
 
         if should_close:
             trades.append({
@@ -258,6 +348,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "hl_coin": hl_coin,
                 "action": "close",
                 "side": "long" if is_long else "short",
+                "size": current_pos["size"],
                 "reason": reason,
             })
 
@@ -337,7 +428,7 @@ def execute_trade(info, exchange, trade: dict, capital: float, leverage: float) 
     coin = trade["hl_coin"]
 
     if trade["action"] == "close":
-        resp = exchange.market_close(coin)
+        resp = close_position(info, exchange, coin, trade["size"])
         return _parse_response(trade, resp, info, coin)
 
     # Open new position: size = (capital * 0.01 * leverage) / price
@@ -588,6 +679,7 @@ def main():
 
     trades = decide_trades(signals, managed_positions, max_positions,
                             all_open_positions=open_positions)
+    trades = apply_exposure_cap(trades, open_positions, equity, info)
     print(f"Decided on {len(trades)} trade(s) (own {len(owned_coins)} position(s))")
 
     results = []
