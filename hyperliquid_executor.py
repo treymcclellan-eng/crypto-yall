@@ -153,9 +153,46 @@ def _resolve_account_address(info, signer_address: str, configured: str) -> str:
 
 
 def get_account_equity(info, address: str) -> float:
-    """Total account value in USDC."""
+    """Total account value in USDC.
+
+    Under Hyperliquid's Unified Account / Portfolio Margin modes the collateral
+    sits in the SPOT balance and the perp clearinghouse reports an account
+    value of 0 (especially when flat), so read spot USDC plus unrealized perp
+    PnL there instead. Standard accounts keep using the perp account value.
+    """
     state = info.user_state(address)
-    return float(state["marginSummary"]["accountValue"])
+    perp_value = float(state["marginSummary"]["accountValue"])
+    unrealized = sum(float(p["position"].get("unrealizedPnl", 0) or 0)
+                     for p in state.get("assetPositions", []))
+
+    mode = ""
+    try:
+        resp = info.post("/info", {"type": "userAbstraction", "user": address})
+        mode = str(resp).lower()
+    except Exception as e:
+        print(f"WARNING: could not read account mode: {e}")
+
+    spot_usdc = 0.0
+    try:
+        spot = info.spot_user_state(address)
+        spot_usdc = sum(float(b.get("total", 0) or 0)
+                        for b in spot.get("balances", [])
+                        if b.get("coin") == "USDC")
+    except Exception as e:
+        print(f"WARNING: could not read spot balances: {e}")
+
+    unified = "unified" in mode or "portfolio" in mode
+    if unified:
+        equity = spot_usdc + unrealized
+        print(f"Unified account: equity = spot USDC {spot_usdc:,.2f} + unrealized PnL "
+              f"{unrealized:,.2f} = {equity:,.2f}")
+        return equity
+    if perp_value <= 0 and spot_usdc > 0:
+        equity = spot_usdc + unrealized
+        print(f"Perp account value is 0 but spot USDC is {spot_usdc:,.2f}; "
+              f"using spot-based equity {equity:,.2f}")
+        return equity
+    return perp_value
 
 
 def _positions_from_fills(info, address: str) -> dict:
@@ -762,4 +799,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
