@@ -22,6 +22,7 @@ from trading_state import load_trading_state, load_intraday_state, load_aggressi
 HL_TICKER_MAP = {
     "BTC-USD": "BTC", "ETH-USD": "ETH", "SOL-USD": "SOL",
     "AVAX-USD": "AVAX", "LINK-USD": "LINK", "SUI20947-USD": "SUI", "XRP-USD": "XRP",
+    "ZEC-USD": "ZEC", "NEAR-USD": "NEAR", "HYPE32196-USD": "HYPE", "VVV-USD": "VVV",
 }
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -119,6 +120,10 @@ ASSETS = {
     "LINK-USD": "Chainlink (LINK)",
     "SUI20947-USD": "Sui (SUI)",
     "XRP-USD": "XRP",
+    "ZEC-USD": "Zcash (ZEC)",
+    "NEAR-USD": "NEAR Protocol (NEAR)",
+    "HYPE32196-USD": "Hyperliquid (HYPE)",
+    "VVV-USD": "Venice Token (VVV)",
 }
 ticker = st.sidebar.selectbox(
     "Asset",
