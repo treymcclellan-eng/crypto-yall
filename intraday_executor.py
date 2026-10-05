@@ -36,6 +36,8 @@ from hyperliquid_executor import (
     _parse_response,
     _send_email,
     _send_telegram,
+    close_position,
+    apply_exposure_cap,
 )
 from backtester import get_asset_profile
 
@@ -139,16 +141,19 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
         is_long = pos["size"] > 0
         is_short = pos["size"] < 0
 
+        # LEVEL-based exit: if we hold a position the strategy no longer
+        # wants, close it. (The old edge-based check only fired on the single
+        # bar where the signal changed, so one skipped run left the position
+        # open forever.)
         action = info["action"]
-        if (action == "sell_exit" and is_long) or \
-           (action == "cover_short" and is_short) or \
-           (action == "buy" and is_short) or \
-           (action == "enter_short" and is_long):
+        sig_val = info.get("signal", 0)
+        if (is_long and sig_val != 1) or (is_short and sig_val != -1):
             trades.append({
                 "ticker": ticker, "hl_coin": hl_coin,
                 "action": "close",
                 "side": "long" if is_long else "short",
-                "reason": f"{action} signal",
+                "size": pos["size"],
+                "reason": f"strategy no longer {'long' if is_long else 'short'} ({action})",
             })
 
     closes = {t["hl_coin"] for t in trades if t["action"] == "close"}
@@ -193,7 +198,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
 def execute_trade(info, exchange, trade: dict, capital: float, leverage: float) -> dict:
     coin = trade["hl_coin"]
     if trade["action"] == "close":
-        resp = exchange.market_close(coin)
+        resp = close_position(info, exchange, coin, trade["size"])
         return _parse_response(trade, resp, info, coin)
 
     mid = get_mid_price(info, coin)
@@ -295,6 +300,7 @@ def main():
 
     trades = decide_trades(signals, managed_positions, max_positions,
                             all_open_positions=open_positions)
+    trades = apply_exposure_cap(trades, open_positions, equity, info)
     print(f"Decided on {len(trades)} intraday trade(s) (own {len(owned_coins)} position(s))")
 
     results = []
