@@ -36,6 +36,10 @@ ASSETS = {
     "LINK-USD": "Chainlink (LINK)",
     "SUI20947-USD": "Sui (SUI)",
     "XRP-USD": "XRP",
+    "ZEC-USD": "Zcash (ZEC)",
+    "NEAR-USD": "NEAR Protocol (NEAR)",
+    "HYPE32196-USD": "Hyperliquid (HYPE)",
+    "VVV-USD": "Venice Token (VVV)",
 }
 
 STATE_FILENAME = "signal_state.json"
