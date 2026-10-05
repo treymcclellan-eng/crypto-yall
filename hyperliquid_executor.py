@@ -116,9 +116,40 @@ def get_client():
     base_url = constants.TESTNET_API_URL if is_testnet else constants.MAINNET_API_URL
     wallet = Account.from_key(priv_key)
     info = Info(base_url, skip_ws=True)
+    account_address = _resolve_account_address(info, wallet.address, account_address.strip())
     exchange = Exchange(wallet, base_url, account_address=account_address)
 
     return info, exchange, account_address
+
+
+def _resolve_account_address(info, signer_address: str, configured: str) -> str:
+    """Return the address whose positions and balance the bots should read.
+
+    Orders are signed by HL_PRIVATE_KEY and land on whatever account that key
+    trades for, no matter what HL_ACCOUNT_ADDRESS says. If the secret holds the
+    wrong address (for example the API wallet's own address), every read
+    (positions, fills, equity) comes back empty while trades still fill, which
+    makes the bots re-buy coins they already hold. So ask Hyperliquid which
+    account this key trades for and use that instead.
+    """
+    try:
+        role = info.post("/info", {"type": "userRole", "user": signer_address})
+    except Exception as e:
+        print(f"WARNING: could not look up the signing key's account ({e}); "
+              f"using HL_ACCOUNT_ADDRESS as configured")
+        return configured
+    kind = role.get("role") if isinstance(role, dict) else None
+    master = None
+    if kind == "agent":
+        master = (role.get("data") or {}).get("user")
+    elif kind == "user":
+        master = signer_address
+    if master and master.lower() != configured.lower():
+        print(f"WARNING: HL_ACCOUNT_ADDRESS ({configured}) is not the account this "
+              f"key trades for ({master}). Reading positions and equity from "
+              f"{master}. Please correct the HL_ACCOUNT_ADDRESS secret.")
+        return master
+    return configured
 
 
 def get_account_equity(info, address: str) -> float:
@@ -225,6 +256,14 @@ def apply_exposure_cap(trades: list, positions: dict, equity: float, info,
     if max_leverage is None:
         max_leverage = float(os.environ.get("MAX_ACCOUNT_LEVERAGE", "2.0"))
     if equity <= 0:
+        if not positions:
+            # Reads show an empty, unfunded account while we are trading: the
+            # reads cannot be trusted, so do not open anything. Closes only.
+            kept = [t for t in trades if t["action"] == "close"]
+            print(f"ERROR: account equity reads $0 and no positions are visible — "
+                  f"HL_ACCOUNT_ADDRESS is probably wrong. Blocking "
+                  f"{len(trades) - len(kept)} open/add trade(s).")
+            return kept
         print("WARNING: equity read as 0 — exposure cap not enforced")
         return trades
     mids = info.all_mids()
