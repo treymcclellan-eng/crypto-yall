@@ -22,6 +22,10 @@ HL_SYMBOL_MAP = {
     "LINK-USD": "LINK",
     "SUI20947-USD": "SUI",
     "XRP-USD": "XRP",
+    "ZEC-USD": "ZEC",
+    "NEAR-USD": "NEAR",
+    "HYPE32196-USD": "HYPE",
+    "VVV-USD": "VVV",
 }
 
 

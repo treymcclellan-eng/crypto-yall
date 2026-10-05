@@ -50,6 +50,10 @@ HL_TICKER_MAP = {
     "LINK-USD": "LINK",
     "SUI20947-USD": "SUI",
     "XRP-USD": "XRP",
+    "ZEC-USD": "ZEC",
+    "NEAR-USD": "NEAR",
+    "HYPE32196-USD": "HYPE",
+    "VVV-USD": "VVV",
 }
 
 ASSETS = {
@@ -60,6 +64,10 @@ ASSETS = {
     "LINK-USD": "Chainlink (LINK)",
     "SUI20947-USD": "Sui (SUI)",
     "XRP-USD": "XRP",
+    "ZEC-USD": "Zcash (ZEC)",
+    "NEAR-USD": "NEAR Protocol (NEAR)",
+    "HYPE32196-USD": "Hyperliquid (HYPE)",
+    "VVV-USD": "Venice Token (VVV)",
 }
 
 STATE_FILENAME = "trading_state.json"

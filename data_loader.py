@@ -9,7 +9,8 @@ import time
 import pandas as pd
 import yfinance as yf
 
-TICKERS = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "SUI20947-USD", "XRP-USD"]
+TICKERS = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "SUI20947-USD", "XRP-USD",
+           "ZEC-USD", "NEAR-USD", "HYPE32196-USD", "VVV-USD"]
 ANCHOR_START = dt.date(2022, 3, 1)  # Fixed start date — never shifts
 
 
@@ -50,11 +51,27 @@ def fetch_data(
             time.sleep(2 ** attempt)  # 1s, 2s, 4s
 
         if df.empty:
-            raise RuntimeError(f"No data returned for {ticker} after 3 attempts (likely rate-limited)")
+            # Yahoo has no data (unknown symbol / rate-limited): fall back to
+            # Hyperliquid's own daily candles so one bad ticker can't break
+            # the whole run.
+            try:
+                from intraday_data_loader import fetch_candles
+                df = fetch_candles(ticker, interval="1d", lookback_hours=24 * 4000)
+                df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                if not df.empty:
+                    print(f"{ticker}: Yahoo returned nothing; using Hyperliquid daily candles ({len(df)} rows)")
+            except Exception as e:
+                print(f"{ticker}: Hyperliquid candle fallback failed: {e}")
+
+        if df.empty:
+            print(f"WARNING: no data for {ticker}; skipping it this run")
+            continue
 
         df.index.name = "Date"
         data[ticker] = df
 
+    if not data:
+        raise RuntimeError("No data returned for any ticker (likely rate-limited)")
     return data
 
 
