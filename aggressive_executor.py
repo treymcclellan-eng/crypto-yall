@@ -23,6 +23,8 @@ import datetime as dt
 
 import requests
 
+import profit_protection
+
 from intraday_data_loader import fetch_all_intraday, HL_SYMBOL_MAP
 from aggressive_strategy import generate_aggressive_signals, classify_aggressive_signal
 from hyperliquid_executor import (
@@ -114,6 +116,9 @@ def compute_aggressive_signals() -> dict:
                 "osc": osc,
                 "pyramid": pyramid,
                 "pyramid_added": pyramid > prev_pyramid,  # fresh pyramid this bar
+                "atr": float(sig["ATR"].iloc[-1]) if "ATR" in sig.columns else 0.0,
+                "high": float(df["High"].iloc[-1]),
+                "low": float(df["Low"].iloc[-1]),
             }
         except Exception as e:
             print(f"Error on {ticker}: {e}")
@@ -124,7 +129,9 @@ def compute_aggressive_signals() -> dict:
 # ── Trade decisions ─────────────────────────────────────────────────────────
 
 def decide_trades(signals: dict, open_positions: dict, max_positions: int,
-                  pyramid_state: dict, all_open_positions: dict | None = None) -> list[dict]:
+                  pyramid_state: dict, all_open_positions: dict | None = None,
+                  extra_exits: dict | None = None,
+                  blocked: dict | None = None) -> list[dict]:
     """Decide trades, including pyramid adds on existing winners.
 
     `open_positions` is this bot's OWN tracked/owned positions (used for
@@ -134,6 +141,8 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
     already holds. Defaults to `open_positions` for backward compatibility.
     """
     trades = []
+    extra_exits = extra_exits or {}   # {coin: reason} protective exits
+    blocked = blocked or {}           # {coin: side} no re-entry until strategy resets
     if all_open_positions is None:
         all_open_positions = open_positions
 
@@ -159,6 +168,15 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "side": "long" if is_long else "short",
                 "size": pos["size"],
                 "reason": f"strategy no longer {'long' if is_long else 'short'} ({action})",
+            })
+        elif hl_coin in extra_exits:
+            trades.append({
+                "ticker": ticker, "hl_coin": hl_coin,
+                "action": "close",
+                "side": "long" if is_long else "short",
+                "size": pos["size"],
+                "reason": extra_exits[hl_coin],
+                "protect": True,
             })
 
     closes = {t["hl_coin"] for t in trades if t["action"] == "close"}
@@ -195,8 +213,10 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
         hl_coin = HL_SYMBOL_MAP[ticker]
         if hl_coin in remaining or hl_coin in all_open_coins:
             continue
+        if hl_coin in extra_exits:
+            continue  # just closed by a protective exit this run
         action = info["action"]
-        if action in ("buy", "hold_long"):
+        if action in ("buy", "hold_long") and blocked.get(hl_coin) != 1:
             reason = "buy signal" if action == "buy" else "sync to hold_long"
             candidates.append({
                 "ticker": ticker, "hl_coin": hl_coin,
@@ -204,7 +224,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "reason": reason,
                 "priority": abs(info["osc"]),
             })
-        elif action in ("enter_short", "hold_short"):
+        elif action in ("enter_short", "hold_short") and blocked.get(hl_coin) != -1:
             reason = "enter_short signal" if action == "enter_short" else "sync to hold_short"
             candidates.append({
                 "ticker": ticker, "hl_coin": hl_coin,
@@ -306,7 +326,8 @@ def main():
     max_positions = int(os.environ.get("AGGRESSIVE_MAX_POSITIONS", "4"))
 
     # Filter assets to those listed on this Hyperliquid environment
-    available = set(info.all_mids().keys())
+    mids = info.all_mids()
+    available = set(mids.keys())
     signals = {t: s for t, s in signals.items() if HL_SYMBOL_MAP[t] in available}
     skipped = [t for t in ASSETS if t not in signals]
     if skipped:
@@ -324,8 +345,19 @@ def main():
     # Per-coin pyramid state (persisted across runs)
     pyramid_state = state.get("pyramid_state", {})
 
+    # Profit protection: break-even / trailing / hard stop (profit_protection.py)
+    peaks = profit_protection.update_peaks(
+        state.get("peaks", {}), managed_positions, signals, mids, HL_SYMBOL_MAP)
+    blocked = profit_protection.update_blocks(
+        state.get("protect_block", {}), signals, HL_SYMBOL_MAP)
+    extra_exits = profit_protection.find_exits(
+        managed_positions, signals, peaks, mids, HL_SYMBOL_MAP)
+    for coin, why in extra_exits.items():
+        print(f"Profit protection: closing {coin} — {why}")
+
     trades = decide_trades(signals, managed_positions, max_positions, pyramid_state,
-                            all_open_positions=open_positions)
+                            all_open_positions=open_positions,
+                            extra_exits=extra_exits, blocked=blocked)
     trades = apply_exposure_cap(trades, open_positions, equity, info)
     print(f"Decided on {len(trades)} aggressive trade(s) (own {len(owned_coins)} position(s))")
 
@@ -343,6 +375,9 @@ def main():
             if result["action"] == "close":
                 owned_coins.discard(coin)
                 pyramid_state.pop(coin, None)
+                peaks.pop(coin, None)
+                if trade.get("protect"):
+                    blocked[coin] = 1 if trade.get("side") == "long" else -1
             elif result["action"].startswith("pyramid_"):
                 pyramid_state[coin] = pyramid_state.get(coin, 0) + 1
             else:
@@ -360,6 +395,8 @@ def main():
     state["last_run"] = dt.datetime.now(dt.UTC).isoformat()
     state["owned_coins"] = sorted(owned_coins)
     state["pyramid_state"] = pyramid_state
+    state["peaks"] = {c: v for c, v in peaks.items() if c in owned_coins}
+    state["protect_block"] = blocked
     latest = get_open_positions(info, address)
     state["open_positions"] = {c: p for c, p in latest.items() if c in owned_coins}
     state["last_signals"] = signals
