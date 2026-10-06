@@ -27,6 +27,7 @@ from decimal import Decimal, ROUND_DOWN
 import requests
 from eth_account import Account
 
+import profit_protection
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
@@ -372,6 +373,7 @@ def compute_all_signals() -> dict:
                 "bull_conf": bull_conf,
                 "bear_conf": bear_conf,
                 "leverage": float(sig["Leverage"].iloc[-1]) if "Leverage" in sig.columns else 1.0,
+                "atr": float(df["ATR"].iloc[-1]) if "ATR" in df.columns else 0.0,
             }
         except Exception as e:
             print(f"Error computing signal for {ticker}: {e}")
@@ -383,7 +385,9 @@ def compute_all_signals() -> dict:
 # ── Trade Decisions ─────────────────────────────────────────────────────────
 
 def decide_trades(signals: dict, open_positions: dict, max_positions: int,
-                   all_open_positions: dict | None = None) -> list[dict]:
+                   all_open_positions: dict | None = None,
+                   extra_exits: dict | None = None,
+                   blocked: dict | None = None) -> list[dict]:
     """
     Reconcile signals vs current positions and return list of trade intents.
 
@@ -393,9 +397,16 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
     opening a new position in a coin another bot already holds. Defaults
     to `open_positions` for backward compatibility.
 
+    `extra_exits` is {coin: reason} for protective exits (break-even,
+    trailing, hard stop — see profit_protection.py). `blocked` is
+    {coin: side} of coins we were protectively stopped out of and must not
+    re-enter in that direction until the strategy resets.
+
     Each intent: {ticker, hl_coin, action, side, reason}
     action: "open_long" | "open_short" | "close"
     """
+    extra_exits = extra_exits or {}
+    blocked = blocked or {}
     trades = []
     if all_open_positions is None:
         all_open_positions = open_positions
@@ -426,6 +437,12 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
             should_close = True
             reason = f"Strategy no longer short ({action_key})"
 
+        protect = False
+        if not should_close and hl_coin in extra_exits:
+            should_close = True
+            protect = True
+            reason = extra_exits[hl_coin]
+
         if should_close:
             trades.append({
                 "ticker": ticker,
@@ -434,6 +451,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "side": "long" if is_long else "short",
                 "size": current_pos["size"],
                 "reason": reason,
+                "protect": protect,
             })
 
     # Step 2: Determine which new positions to open
@@ -459,10 +477,12 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
         existing = remaining_positions.get(hl_coin)
         if existing or hl_coin in all_open_coins:
             continue
+        if hl_coin in extra_exits:
+            continue  # just closed by a protective exit this run
 
         # Open on fresh entry (buy/enter_short) OR sync when strategy
         # says we should be holding long/short but we have no position.
-        if action_key in ("buy", "hold_long"):
+        if action_key in ("buy", "hold_long") and blocked.get(hl_coin) != 1:
             reason = "BUY signal" if action_key == "buy" else "Sync to hold_long (strategy already in position)"
             open_candidates.append({
                 "ticker": ticker,
@@ -472,7 +492,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "reason": reason,
                 "confidence": info["bull_conf"],
             })
-        elif action_key in ("enter_short", "hold_short"):
+        elif action_key in ("enter_short", "hold_short") and blocked.get(hl_coin) != -1:
             reason = "ENTER SHORT signal" if action_key == "enter_short" else "Sync to hold_short (strategy already in position)"
             open_candidates.append({
                 "ticker": ticker,
@@ -741,7 +761,8 @@ def main():
     max_positions = int(os.environ.get("MAX_POSITIONS", "4"))
 
     # Filter out assets not listed on this Hyperliquid environment
-    available = set(info.all_mids().keys())
+    mids = info.all_mids()
+    available = set(mids.keys())
     signals = {t: s for t, s in signals.items() if HL_TICKER_MAP[t] in available}
     skipped = [t for t in ASSETS if t not in signals]
     if skipped:
@@ -761,8 +782,19 @@ def main():
 
     managed_positions = {c: p for c, p in open_positions.items() if c in owned_coins}
 
+    # Profit protection: break-even / trailing / hard stop (profit_protection.py)
+    peaks = profit_protection.update_peaks(
+        state.get("peaks", {}), managed_positions, signals, mids, HL_TICKER_MAP)
+    blocked = profit_protection.update_blocks(
+        state.get("protect_block", {}), signals, HL_TICKER_MAP)
+    extra_exits = profit_protection.find_exits(
+        managed_positions, signals, peaks, mids, HL_TICKER_MAP)
+    for coin, why in extra_exits.items():
+        print(f"Profit protection: closing {coin} — {why}")
+
     trades = decide_trades(signals, managed_positions, max_positions,
-                            all_open_positions=open_positions)
+                            all_open_positions=open_positions,
+                            extra_exits=extra_exits, blocked=blocked)
     trades = apply_exposure_cap(trades, open_positions, equity, info)
     print(f"Decided on {len(trades)} trade(s) (own {len(owned_coins)} position(s))")
 
@@ -780,6 +812,9 @@ def main():
             coin = result["hl_coin"]
             if result["action"] == "close":
                 owned_coins.discard(coin)
+                peaks.pop(coin, None)
+                if trade.get("protect"):
+                    blocked[coin] = 1 if trade.get("side") == "long" else -1
             else:
                 owned_coins.add(coin)
 
@@ -794,6 +829,8 @@ def main():
     state["last_equity"] = equity
     state["last_run"] = dt.datetime.utcnow().isoformat() + "Z"
     state["owned_coins"] = sorted(owned_coins)
+    state["peaks"] = {c: v for c, v in peaks.items() if c in owned_coins}
+    state["protect_block"] = blocked
     # Show only our positions on the dashboard
     latest_positions = get_open_positions(info, address)
     state["open_positions"] = {c: p for c, p in latest_positions.items() if c in owned_coins}
