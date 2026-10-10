@@ -126,7 +126,8 @@ def compute_intraday_signals() -> dict:
 def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                    all_open_positions: dict | None = None,
                    extra_exits: dict | None = None,
-                   blocked: dict | None = None) -> list[dict]:
+                   blocked: dict | None = None,
+                   cooldown: dict | None = None) -> list[dict]:
     """Decide trades given new signals vs current HL positions.
 
     `open_positions` is this bot's OWN tracked/owned positions (used for
@@ -137,6 +138,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
     """
     trades = []
     extra_exits = extra_exits or {}   # {coin: reason} protective exits
+    cooldown = cooldown or {}
     blocked = blocked or {}           # {coin: side} no re-entry until strategy resets
     if all_open_positions is None:
         all_open_positions = open_positions
@@ -190,10 +192,12 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
             continue
         if hl_coin in extra_exits:
             continue  # just closed by a protective exit this run
+        if hl_coin in cooldown:
+            continue  # cooling down after a recent stop-out
         action = info["action"]
         # Open on fresh entry (buy/enter_short) OR sync when strategy
         # says we should be holding but we have no position.
-        if action in ("buy", "hold_long") and blocked.get(hl_coin) != 1:
+        if action in ("buy",) and blocked.get(hl_coin) != 1:
             reason = "buy signal" if action == "buy" else "sync to hold_long"
             candidates.append({
                 "ticker": ticker, "hl_coin": hl_coin,
@@ -201,7 +205,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "reason": reason,
                 "priority": abs(info["osc"]),
             })
-        elif action in ("enter_short", "hold_short") and blocked.get(hl_coin) != -1:
+        elif action in ("enter_short",) and blocked.get(hl_coin) != -1:
             reason = "enter_short signal" if action == "enter_short" else "sync to hold_short"
             candidates.append({
                 "ticker": ticker, "hl_coin": hl_coin,
@@ -324,6 +328,9 @@ def main():
         state.get("peaks", {}), managed_positions, signals, mids, HL_SYMBOL_MAP)
     blocked = profit_protection.update_blocks(
         state.get("protect_block", {}), signals, HL_SYMBOL_MAP)
+    cooldowns = profit_protection.active_cooldowns(state.get("cooldowns", {}))
+    if cooldowns:
+        print(f"Re-entry cooldown active: {sorted(cooldowns)}")
     extra_exits = profit_protection.find_exits(
         managed_positions, signals, peaks, mids, HL_SYMBOL_MAP)
     for coin, why in extra_exits.items():
@@ -331,7 +338,8 @@ def main():
 
     trades = decide_trades(signals, managed_positions, max_positions,
                             all_open_positions=open_positions,
-                            extra_exits=extra_exits, blocked=blocked)
+                            extra_exits=extra_exits, blocked=blocked,
+                            cooldown=cooldowns)
     trades = apply_exposure_cap(trades, open_positions, equity, info)
     print(f"Decided on {len(trades)} intraday trade(s) (own {len(owned_coins)} position(s))")
 
@@ -347,6 +355,9 @@ def main():
             if result["action"] == "close":
                 owned_coins.discard(coin)
                 peaks.pop(coin, None)
+                profit_protection.register_stopout(
+                    cooldowns, coin, managed_positions.get(coin), mids,
+                    bool(trade.get("protect")))
                 if trade.get("protect"):
                     blocked[coin] = 1 if trade.get("side") == "long" else -1
             else:
@@ -364,6 +375,7 @@ def main():
     state["owned_coins"] = sorted(owned_coins)
     state["peaks"] = {c: v for c, v in peaks.items() if c in owned_coins}
     state["protect_block"] = blocked
+    state["cooldowns"] = profit_protection.active_cooldowns(cooldowns)
     latest = get_open_positions(info, address)
     state["open_positions"] = {c: p for c, p in latest.items() if c in owned_coins}
     state["last_signals"] = signals

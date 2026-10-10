@@ -30,6 +30,7 @@ Settings (GitHub repo Variables, all optional):
 
 import math
 import os
+import time
 
 
 # ── Settings ────────────────────────────────────────────────────────────────
@@ -241,3 +242,44 @@ def update_blocks(blocked: dict, signals: dict, coin_map: dict) -> dict:
         if sig.get("signal", 0) != side or fresh_entry:
             del blocked[coin]
     return blocked
+
+
+# ── Re-entry cooldown after stop-outs ───────────────────────────────────────
+
+def cooldown_seconds() -> float:
+    """REENTRY_COOLDOWN_HOURS (default 24; 0 disables)."""
+    return max(0.0, _env_float("REENTRY_COOLDOWN_HOURS", 24.0)) * 3600.0
+
+
+def active_cooldowns(cooldowns: dict | None) -> dict:
+    """Return {coin: start_epoch} for cooldowns that have not yet expired."""
+    secs = cooldown_seconds()
+    if secs <= 0:
+        return {}
+    now = time.time()
+    out = {}
+    for coin, started in (cooldowns or {}).items():
+        try:
+            if now - float(started) < secs:
+                out[coin] = float(started)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def register_stopout(cooldowns: dict, coin: str, pos: dict | None,
+                     mids: dict | None, protect: bool) -> None:
+    """Start a cooldown on `coin` if the close was a protective exit or a loss."""
+    if cooldown_seconds() <= 0:
+        return
+    losing = False
+    try:
+        entry = float((pos or {}).get("entry_px") or 0)
+        size = float((pos or {}).get("size") or 0)
+        price = float((mids or {}).get(coin) or 0)
+        if entry > 0 and price > 0 and size != 0:
+            losing = _side(size) * (price - entry) < 0
+    except (TypeError, ValueError):
+        pass
+    if protect or losing:
+        cooldowns[coin] = time.time()
