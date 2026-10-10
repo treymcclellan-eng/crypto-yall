@@ -62,7 +62,7 @@ Three trading bots run independently on the same Hyperliquid account. Each bot:
 
 Seven perpetual futures pairs on Hyperliquid:
 - **Large caps** (3x max leverage, shorting allowed): BTC, ETH
-- **Mid caps** (1.5x max leverage, no shorting): SOL, AVAX, LINK, SUI, XRP
+- **Mid caps** (1.5x max leverage, shorting allowed): SOL, AVAX, LINK, SUI, XRP, ZEC, NEAR, HYPE, VVV
 
 > **Note:** LINK and XRP are not listed on Hyperliquid **testnet**. Both will be available on mainnet. The bots automatically skip unavailable assets.
 
