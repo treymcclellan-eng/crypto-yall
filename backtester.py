@@ -41,7 +41,7 @@ PARAM_GRID = {
 
 # ── Asset-Class Profiles ─────────────────────────────────────────────────────
 # Large Cap: BTC/ETH — higher leverage, shorting allowed
-# Mid Cap: SOL/AVAX/LINK/SUI/XRP/ZEC/NEAR/HYPE/VVV — lower leverage, no shorts, wider stops
+# Mid Cap: SOL/AVAX/LINK/SUI/XRP/ZEC/NEAR/HYPE/VVV — lower leverage, shorts allowed, wider stops
 
 ASSET_PROFILES = {
     "large_cap": {
@@ -56,7 +56,7 @@ ASSET_PROFILES = {
         "tickers": {"SOL-USD", "AVAX-USD", "LINK-USD", "SUI20947-USD", "XRP-USD",
                     "ZEC-USD", "NEAR-USD", "HYPE32196-USD", "VVV-USD"},
         "max_bull_leverage": 1.5,   # reduced leverage for volatile alts
-        "allow_short": False,       # no shorting — too volatile
+        "allow_short": True,        # shorting enabled for mid caps
         "atr_mult": 4.0,           # wider trailing stop
     },
 }
