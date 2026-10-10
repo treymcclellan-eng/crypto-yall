@@ -387,7 +387,8 @@ def compute_all_signals() -> dict:
 def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                    all_open_positions: dict | None = None,
                    extra_exits: dict | None = None,
-                   blocked: dict | None = None) -> list[dict]:
+                   blocked: dict | None = None,
+                   cooldown: dict | None = None) -> list[dict]:
     """
     Reconcile signals vs current positions and return list of trade intents.
 
@@ -406,6 +407,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
     action: "open_long" | "open_short" | "close"
     """
     extra_exits = extra_exits or {}
+    cooldown = cooldown or {}
     blocked = blocked or {}
     trades = []
     if all_open_positions is None:
@@ -479,10 +481,12 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
             continue
         if hl_coin in extra_exits:
             continue  # just closed by a protective exit this run
+        if hl_coin in cooldown:
+            continue  # cooling down after a recent stop-out
 
         # Open on fresh entry (buy/enter_short) OR sync when strategy
         # says we should be holding long/short but we have no position.
-        if action_key in ("buy", "hold_long") and blocked.get(hl_coin) != 1:
+        if action_key in ("buy",) and blocked.get(hl_coin) != 1:
             reason = "BUY signal" if action_key == "buy" else "Sync to hold_long (strategy already in position)"
             open_candidates.append({
                 "ticker": ticker,
@@ -492,7 +496,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "reason": reason,
                 "confidence": info["bull_conf"],
             })
-        elif action_key in ("enter_short", "hold_short") and blocked.get(hl_coin) != -1:
+        elif action_key in ("enter_short",) and blocked.get(hl_coin) != -1:
             reason = "ENTER SHORT signal" if action_key == "enter_short" else "Sync to hold_short (strategy already in position)"
             open_candidates.append({
                 "ticker": ticker,
@@ -787,6 +791,9 @@ def main():
         state.get("peaks", {}), managed_positions, signals, mids, HL_TICKER_MAP)
     blocked = profit_protection.update_blocks(
         state.get("protect_block", {}), signals, HL_TICKER_MAP)
+    cooldowns = profit_protection.active_cooldowns(state.get("cooldowns", {}))
+    if cooldowns:
+        print(f"Re-entry cooldown active: {sorted(cooldowns)}")
     extra_exits = profit_protection.find_exits(
         managed_positions, signals, peaks, mids, HL_TICKER_MAP)
     for coin, why in extra_exits.items():
@@ -794,7 +801,8 @@ def main():
 
     trades = decide_trades(signals, managed_positions, max_positions,
                             all_open_positions=open_positions,
-                            extra_exits=extra_exits, blocked=blocked)
+                            extra_exits=extra_exits, blocked=blocked,
+                            cooldown=cooldowns)
     trades = apply_exposure_cap(trades, open_positions, equity, info)
     print(f"Decided on {len(trades)} trade(s) (own {len(owned_coins)} position(s))")
 
@@ -813,6 +821,9 @@ def main():
             if result["action"] == "close":
                 owned_coins.discard(coin)
                 peaks.pop(coin, None)
+                profit_protection.register_stopout(
+                    cooldowns, coin, managed_positions.get(coin), mids,
+                    bool(trade.get("protect")))
                 if trade.get("protect"):
                     blocked[coin] = 1 if trade.get("side") == "long" else -1
             else:
@@ -831,6 +842,7 @@ def main():
     state["owned_coins"] = sorted(owned_coins)
     state["peaks"] = {c: v for c, v in peaks.items() if c in owned_coins}
     state["protect_block"] = blocked
+    state["cooldowns"] = profit_protection.active_cooldowns(cooldowns)
     # Show only our positions on the dashboard
     latest_positions = get_open_positions(info, address)
     state["open_positions"] = {c: p for c, p in latest_positions.items() if c in owned_coins}
@@ -844,5 +856,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
