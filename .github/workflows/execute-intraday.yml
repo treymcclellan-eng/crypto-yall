@@ -2,7 +2,7 @@ name: Execute Intraday
 
 on:
   schedule:
-    - cron: '5 * * * *'       # Every hour at :05 UTC
+    - cron: '17 * * * *'      # Every hour at :17 UTC (off-peak)
   workflow_dispatch: {}
 
 jobs:

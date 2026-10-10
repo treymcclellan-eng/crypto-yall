@@ -2,7 +2,7 @@ name: Execute Aggressive
 
 on:
   schedule:
-    - cron: '*/30 * * * *'    # Every 30 minutes
+    - cron: '7,37 * * * *'    # Every 30 minutes (off-peak minutes)
   workflow_dispatch: {}
 
 jobs:

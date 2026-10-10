@@ -2,7 +2,7 @@ name: Execute Trades
 
 on:
   schedule:
-    - cron: '15 0 * * *'     # Daily at 00:15 UTC (15 min after signal refresh)
+    - cron: '23 0 * * *'     # Daily at 00:23 UTC (after the daily candle closes)
   workflow_dispatch: {}       # Manual trigger for testing
 
 jobs:
