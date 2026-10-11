@@ -37,6 +37,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PROFIT_PROTECTION: ${{ vars.PROFIT_PROTECTION }}
+          REENTRY_COOLDOWN_HOURS: ${{ vars.REENTRY_COOLDOWN_HOURS }}
           PP_BE_ATR: ${{ vars.PP_BE_ATR }}
           PP_TRAIL_ATR: ${{ vars.PP_TRAIL_ATR }}
           PP_TRAIL_DIST_ATR: ${{ vars.PP_TRAIL_DIST_ATR }}
