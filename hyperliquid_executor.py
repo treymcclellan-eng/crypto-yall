@@ -805,6 +805,8 @@ def main():
                             extra_exits=extra_exits, blocked=blocked,
                             cooldown=cooldowns)
     trades = apply_exposure_cap(trades, open_positions, equity, info)
+    print("Signals: " + profit_protection.summarize_signals(
+        signals, HL_TICKER_MAP, open_positions, blocked, cooldowns))
     print(f"Decided on {len(trades)} trade(s) (own {len(owned_coins)} position(s))")
 
     results = []
