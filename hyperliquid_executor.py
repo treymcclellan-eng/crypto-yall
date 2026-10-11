@@ -481,12 +481,11 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
             continue
         if hl_coin in extra_exits:
             continue  # just closed by a protective exit this run
-        if hl_coin in cooldown:
-            continue  # cooling down after a recent stop-out
 
         # Open on fresh entry (buy/enter_short) OR sync when strategy
         # says we should be holding long/short but we have no position.
-        if action_key in ("buy",) and blocked.get(hl_coin) != 1:
+        if action_key in ("buy",) and blocked.get(hl_coin) != 1 \
+                and not profit_protection.in_cooldown(cooldown, hl_coin, 1):
             reason = "BUY signal" if action_key == "buy" else "Sync to hold_long (strategy already in position)"
             open_candidates.append({
                 "ticker": ticker,
@@ -496,7 +495,8 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "reason": reason,
                 "confidence": info["bull_conf"],
             })
-        elif action_key in ("enter_short",) and blocked.get(hl_coin) != -1:
+        elif action_key in ("enter_short",) and blocked.get(hl_coin) != -1 \
+                and not profit_protection.in_cooldown(cooldown, hl_coin, -1):
             reason = "ENTER SHORT signal" if action_key == "enter_short" else "Sync to hold_short (strategy already in position)"
             open_candidates.append({
                 "ticker": ticker,
@@ -793,7 +793,8 @@ def main():
         state.get("protect_block", {}), signals, HL_TICKER_MAP)
     cooldowns = profit_protection.active_cooldowns(state.get("cooldowns", {}))
     if cooldowns:
-        print(f"Re-entry cooldown active: {sorted(cooldowns)}")
+        print(f"Re-entry cooldown active: "
+              f"{ {c: r['side'] for c, r in cooldowns.items()} }")
     extra_exits = profit_protection.find_exits(
         managed_positions, signals, peaks, mids, HL_TICKER_MAP)
     for coin, why in extra_exits.items():
