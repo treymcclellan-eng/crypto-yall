@@ -306,3 +306,34 @@ def register_stopout(cooldowns: dict, coin: str, pos: dict | None,
         pass
     if protect or losing:
         cooldowns[coin] = {"ts": time.time(), "side": side}
+
+
+# ── Per-run signal summary (log line) ───────────────────────────────────────
+
+def summarize_signals(signals: dict, coin_map: dict, positions: dict,
+                      blocked: dict | None = None,
+                      cooldowns: dict | None = None) -> str:
+    """One readable line per run: each coin's signal and why it can't open.
+
+    Example: "BTC:flat | SOL:hold_long[no fresh entry] | AVAX:enter_short[HELD short]"
+    """
+    parts = []
+    for ticker, sig in sorted((signals or {}).items()):
+        coin = coin_map.get(ticker, ticker)
+        action = sig.get("action", "?")
+        tags = []
+        pos = (positions or {}).get(coin)
+        if pos and float(pos.get("size", 0)) != 0:
+            tags.append("HELD " + ("long" if float(pos["size"]) > 0 else "short"))
+        elif action in ("hold_long", "hold_short"):
+            tags.append("no fresh entry")
+        elif action in ("buy", "enter_short"):
+            want = 1 if action == "buy" else -1
+            if (blocked or {}).get(coin) == want:
+                tags.append("blocked: protective exit")
+            elif in_cooldown(cooldowns, coin, want):
+                tags.append("blocked: cooldown")
+            else:
+                tags.append("FRESH SIGNAL")
+        parts.append(f"{coin}:{action}" + (f"[{', '.join(tags)}]" if tags else ""))
+    return " | ".join(parts)
