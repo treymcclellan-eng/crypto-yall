@@ -41,11 +41,12 @@ from hyperliquid_executor import (
     close_position,
     apply_exposure_cap,
 )
-from backtester import get_asset_profile
+from backtester import get_asset_profile, ASSET_PROFILES
 
 
 STATE_FILENAME = "aggressive_state.json"
 POSITION_SIZE_PCT = 0.015  # 1.5% per trade — higher than standard intraday
+LARGE_CAP_SIZE_MULT = float(os.environ.get("AGGRESSIVE_LARGE_CAP_SIZE_MULT") or 0.5)
 PYRAMID_SIZE_PCT = 0.005   # 0.5% extra per pyramid add (max 2 adds)
 
 
@@ -242,7 +243,8 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
     return trades
 
 
-def execute_trade(info, exchange, trade: dict, capital: float, leverage: float) -> dict:
+def execute_trade(info, exchange, trade: dict, capital: float, leverage: float,
+                  size_mult: float = 1.0) -> dict:
     coin = trade["hl_coin"]
     if trade["action"] == "close":
         resp = close_position(info, exchange, coin, trade["size"])
@@ -251,7 +253,7 @@ def execute_trade(info, exchange, trade: dict, capital: float, leverage: float) 
     mid = get_mid_price(info, coin)
     # Pyramid adds use smaller size
     size_pct = PYRAMID_SIZE_PCT if trade["action"].startswith("pyramid_") else POSITION_SIZE_PCT
-    notional = capital * size_pct * leverage
+    notional = capital * size_pct * leverage * size_mult
     raw_size = notional / mid
     sz_decimals = get_size_decimals(info, coin)
     size = round_size(raw_size, sz_decimals)
@@ -377,7 +379,10 @@ def main():
         # Aggressive leverage: 4x for large cap (capped at 3x by HL), 1.5x for mid cap
         profile = get_asset_profile(trade["ticker"])
         leverage = min(4.0, profile["max_bull_leverage"] * 1.33)  # bumped from standard
-        result = execute_trade(info, exchange, trade, capital, leverage)
+        # Large caps (BTC/ETH) trade at 3x leverage, which made them ~2x the size
+        # of mid-cap trades. Scale their notional down (default 0.5 => ~same as mid caps).
+        size_mult = LARGE_CAP_SIZE_MULT if profile is ASSET_PROFILES["large_cap"] else 1.0
+        result = execute_trade(info, exchange, trade, capital, leverage, size_mult)
         results.append(result)
         print(f"  {result['ticker']} {result['action']}: {result.get('status')}")
 
