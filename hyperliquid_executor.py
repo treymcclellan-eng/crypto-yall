@@ -263,6 +263,15 @@ def get_open_positions(info, address: str) -> dict:
             "unrealized_pnl": float(pos["unrealizedPnl"]),
         }
 
+    # The fills cross-check is only a fallback for when the clearinghouse read
+    # comes back completely empty. When it returns positions it is the source of
+    # truth: fills-derived sizes can be wrong (partial/aggregated fills) and were
+    # inventing phantom positions that blocked every new entry and triggered
+    # closes on positions that do not exist.
+    if positions:
+        print(f"Open positions on account: { {c: p['size'] for c, p in positions.items()} }")
+        return positions
+
     from_fills = _positions_from_fills(info, address)
     missing = {c: p for c, p in from_fills.items() if c not in positions}
     if missing:
