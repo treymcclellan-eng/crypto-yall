@@ -23,7 +23,7 @@ import argparse
 import math
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -60,6 +60,10 @@ class Rules:
     exclude: tuple = ()
     long_mult: float = 1.0          # scale long size
     protect: bool = True
+    trail_only: bool = False        # ignore oscillator flip exits; exit via protection/time stop only
+    min_hold_h: float = 0.0         # ignore oscillator flip exits until held this long
+    max_hold_h: float = 0.0         # time stop (0 = off)
+    pp: dict = field(default_factory=dict)   # overrides for profit-protection settings
 
 
 @dataclass
@@ -73,14 +77,23 @@ class Pos:
     fresh: bool = True
 
 
-def build_market(raw: dict) -> dict:
+def resample(df: pd.DataFrame, factor: int) -> pd.DataFrame:
+    if factor == 1:
+        return df
+    o = df.resample(f"{30 * factor}min").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
+    return o.dropna(subset=["Close"])
+
+
+def build_market(raw: dict, factor: int = 1, **sig_kwargs) -> dict:
     """raw: ticker -> OHLCV df. Returns aligned frames + signals."""
+    raw = {t: resample(df, factor) for t, df in raw.items() if df is not None and len(df)}
     idx = pd.DatetimeIndex(sorted(set().union(*[set(df.index) for df in raw.values() if len(df)])))
     mk = {"index": idx, "coins": {}}
     for t, df in raw.items():
         if df is None or len(df) < WARMUP + 50:
             continue
-        sig = generate_aggressive_signals(df, allow_short=True)
+        sig = generate_aggressive_signals(df, allow_short=True, **sig_kwargs)
         s = sig["Signal"].astype(int)
         act = [classify_aggressive_signal(int(s.iloc[i]), int(s.iloc[i - 1]) if i else 0)
                for i in range(len(s))]
@@ -97,7 +110,7 @@ def build_market(raw: dict) -> dict:
 def simulate(mk: dict, rules: Rules) -> pd.DataFrame:
     idx = mk["index"]
     coins = mk["coins"]
-    cfg = pp.settings()
+    cfg = {**pp.settings(), **rules.pp}
 
     trend_up = {}
     if rules.trend_bars:
@@ -149,7 +162,8 @@ def simulate(mk: dict, rules: Rules) -> pd.DataFrame:
             p.peak = max([p.peak] + cands) if p.side == 1 else min([p.peak] + cands)
             p.fresh = False
 
-            if s["signal"] != p.side:
+            held_h = (ts - p.t_open).total_seconds() / 3600
+            if s["signal"] != p.side and not rules.trail_only and held_h >= rules.min_hold_h:
                 close(t, ts, s["price"], "signal")
                 continue
             if rules.protect:
@@ -160,10 +174,13 @@ def simulate(mk: dict, rules: Rules) -> pd.DataFrame:
                     close(t, ts, s["price"], reason.split(":")[0])
                     blocked[t] = side
                     protect_closed.add(t)
+                    continue
+            if rules.max_hold_h and held_h >= rules.max_hold_h:
+                close(t, ts, s["price"], "time stop")
 
         for t, p in pos.items():
             s = sigs.get(t)
-            if s and s["pyramid_added"] and p.pyramids < 2:
+            if s and s["pyramid_added"] and p.pyramids < 2 and s["signal"] == p.side:
                 px = fill_px(s["price"], p.side == 1)
                 add = PYRAMID_NOTIONAL / px
                 p.entry = (p.entry * p.size + px * add) / (p.size + add)
