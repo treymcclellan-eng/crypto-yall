@@ -37,6 +37,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PROFIT_PROTECTION: ${{ vars.PROFIT_PROTECTION }}
+          AGGRESSIVE_MODE: ${{ vars.AGGRESSIVE_MODE }}
+          SLOW_BAR_HOURS: ${{ vars.SLOW_BAR_HOURS }}
+          SLOW_OSC_THR: ${{ vars.SLOW_OSC_THR }}
+          SLOW_MAX_HOLD_H: ${{ vars.SLOW_MAX_HOLD_H }}
+          SLOW_TREND_HOURS: ${{ vars.SLOW_TREND_HOURS }}
+          SLOW_MAX_SAME_DIR: ${{ vars.SLOW_MAX_SAME_DIR }}
           REENTRY_COOLDOWN_HOURS: ${{ vars.REENTRY_COOLDOWN_HOURS }}
           PP_BE_ATR: ${{ vars.PP_BE_ATR }}
           PP_TRAIL_ATR: ${{ vars.PP_TRAIL_ATR }}

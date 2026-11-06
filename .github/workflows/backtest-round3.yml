@@ -1,0 +1,46 @@
+name: Backtest Round 3
+
+# Manual only. Round 3: neighbourhood + cost stress around the slow-mode winner, on ~100 days of Hyperliquid 30-min
+# candles and compares rule changes. Places no orders and uses no secrets.
+# Results are committed to the `backtest-results-3` branch (results/report.md).
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run replay
+        run: python backtest_round3.py --out results
+
+      - name: Job summary
+        run: cat results/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results-3
+          path: results/
+
+      - name: Commit results to backtest-results-3 branch
+        run: |
+          git config user.name "backtest-bot"
+          git config user.email "backtest-bot@users.noreply.github.com"
+          git checkout --orphan backtest-results-3
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          git add -f results
+          git commit -m "Backtest results $(date -u +%Y-%m-%d_%H%M)"
+          git push --force origin backtest-results-3
