@@ -24,6 +24,7 @@ import datetime as dt
 import requests
 
 import profit_protection
+import slow_mode
 
 from intraday_data_loader import fetch_all_intraday, HL_SYMBOL_MAP
 from aggressive_strategy import generate_aggressive_signals, classify_aggressive_signal
@@ -88,9 +89,16 @@ def save_state(state: dict):
 
 # ── Signal computation ─────────────────────────────────────────────────────
 
-def compute_aggressive_signals() -> dict:
-    """Fetch 30-min candles and compute aggressive signals per asset."""
-    all_data = fetch_all_intraday(list(ASSETS.keys()), interval="30m", lookback_hours=1000)
+def compute_aggressive_signals(state: dict | None = None) -> dict:
+    """Fetch 30-min candles and compute aggressive signals per asset.
+
+    In slow mode (AGGRESSIVE_MODE=slow) signals come from completed multi-hour
+    bars instead; see slow_mode.py.
+    """
+    slow = slow_mode.settings() if slow_mode.enabled() else None
+    all_data = fetch_all_intraday(list(ASSETS.keys()), interval="30m",
+                                  lookback_hours=1000 if slow is None else 1400)
+    last_seen = (state or {}).get("slow_bars", {})
     current = {}
 
     for ticker in ASSETS:
@@ -100,7 +108,16 @@ def compute_aggressive_signals() -> dict:
                 continue
 
             profile = get_asset_profile(ticker)
-            sig = generate_aggressive_signals(df, allow_short=profile["allow_short"])
+            sig_df = df
+            if slow is not None:
+                sig_df = slow_mode.resample_closed(df, slow["bar_hours"])
+                if len(sig_df) < 50:
+                    continue
+                sig = generate_aggressive_signals(
+                    sig_df, allow_short=profile["allow_short"],
+                    osc_upper=slow["osc_thr"], osc_lower=-slow["osc_thr"])
+            else:
+                sig = generate_aggressive_signals(df, allow_short=profile["allow_short"])
 
             last = int(sig["Signal"].iloc[-1])
             prev = int(sig["Signal"].iloc[-2]) if len(sig) >= 2 else last
@@ -121,6 +138,11 @@ def compute_aggressive_signals() -> dict:
                 "high": float(df["High"].iloc[-1]),
                 "low": float(df["Low"].iloc[-1]),
             }
+            if slow is not None:
+                current[ticker]["trend_up"] = slow_mode.trend_up(
+                    sig_df, slow["trend_hours"], slow["bar_hours"])
+                slow_mode.apply_bar_freshness(
+                    current[ticker], str(sig_df.index[-1]), last_seen, ticker)
         except Exception as e:
             print(f"Error on {ticker}: {e}")
 
@@ -133,7 +155,9 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                   pyramid_state: dict, all_open_positions: dict | None = None,
                   extra_exits: dict | None = None,
                   blocked: dict | None = None,
-                   cooldown: dict | None = None) -> list[dict]:
+                   cooldown: dict | None = None,
+                  slow: dict | None = None,
+                  time_exits: dict | None = None) -> list[dict]:
     """Decide trades, including pyramid adds on existing winners.
 
     `open_positions` is this bot's OWN tracked/owned positions (used for
@@ -145,6 +169,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
     trades = []
     extra_exits = extra_exits or {}   # {coin: reason} protective exits
     cooldown = cooldown or {}
+    time_exits = time_exits or {}     # slow mode: {coin: reason} time-stop exits
     blocked = blocked or {}           # {coin: side} no re-entry until strategy resets
     if all_open_positions is None:
         all_open_positions = open_positions
@@ -164,7 +189,7 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
         # open forever.)
         action = info["action"]
         sig_val = info.get("signal", 0)
-        if (is_long and sig_val != 1) or (is_short and sig_val != -1):
+        if slow is None and ((is_long and sig_val != 1) or (is_short and sig_val != -1)):
             trades.append({
                 "ticker": ticker, "hl_coin": hl_coin,
                 "action": "close",
@@ -180,6 +205,14 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
                 "size": pos["size"],
                 "reason": extra_exits[hl_coin],
                 "protect": True,
+            })
+        elif hl_coin in time_exits:
+            trades.append({
+                "ticker": ticker, "hl_coin": hl_coin,
+                "action": "close",
+                "side": "long" if is_long else "short",
+                "size": pos["size"],
+                "reason": time_exits[hl_coin],
             })
 
     closes = {t["hl_coin"] for t in trades if t["action"] == "close"}
@@ -219,6 +252,12 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
         if hl_coin in extra_exits:
             continue  # just closed by a protective exit this run
         action = info["action"]
+        if slow is not None and info.get("trend_up") is not None:
+            # slow mode trend gate: longs only above the trend average, shorts only below
+            if action == "buy" and not info["trend_up"]:
+                continue
+            if action == "enter_short" and info["trend_up"]:
+                continue
         if action in ("buy",) and blocked.get(hl_coin) != 1 \
                 and not profit_protection.in_cooldown(cooldown, hl_coin, 1):
             reason = "buy signal" if action == "buy" else "sync to hold_long"
@@ -239,6 +278,22 @@ def decide_trades(signals: dict, open_positions: dict, max_positions: int,
             })
 
     candidates.sort(key=lambda c: c["priority"], reverse=True)
+    max_same = (slow or {}).get("max_same_dir", 0)
+    if max_same:
+        n_long = sum(1 for p in remaining.values() if p["size"] > 0)
+        n_short = len(remaining) - n_long
+        kept = []
+        for c in candidates:
+            if c["side"] == "long" and n_long >= max_same:
+                continue
+            if c["side"] == "short" and n_short >= max_same:
+                continue
+            kept.append(c)
+            if c["side"] == "long":
+                n_long += 1
+            else:
+                n_short += 1
+        candidates = kept
     trades.extend(candidates[:slots])
     return trades
 
@@ -326,7 +381,10 @@ def main():
         print(f"Already halted today: {state.get('halt_reason')}")
         sys.exit(0)
 
-    signals = compute_aggressive_signals()
+    slow = slow_mode.settings() if slow_mode.enabled() else None
+    if slow:
+        print(f"SLOW MODE on: {slow}")
+    signals = compute_aggressive_signals(state)
     open_positions = get_open_positions(info, address)
     capital = float(os.environ.get("AGGRESSIVE_CAPITAL", "3000"))
     max_positions = int(os.environ.get("AGGRESSIVE_MAX_POSITIONS", "4"))
@@ -365,10 +423,20 @@ def main():
     for coin, why in extra_exits.items():
         print(f"Profit protection: closing {coin} — {why}")
 
+    opened_at = state.get("opened_at", {})
+    time_stop = {}
+    if slow:
+        now_ts = slow_mode.utc_now()
+        for coin in managed_positions:
+            opened_at.setdefault(coin, now_ts.isoformat())
+        time_stop = slow_mode.time_exits(managed_positions, opened_at, now_ts, slow["max_hold_h"])
+        for coin, why in time_stop.items():
+            print(f"Slow mode: closing {coin} — {why}")
+
     trades = decide_trades(signals, managed_positions, max_positions, pyramid_state,
                             all_open_positions=open_positions,
                             extra_exits=extra_exits, blocked=blocked,
-                            cooldown=cooldowns)
+                            cooldown=cooldowns, slow=slow, time_exits=time_stop)
     trades = apply_exposure_cap(trades, open_positions, equity, info)
     print("Signals: " + profit_protection.summarize_signals(
         signals, HL_SYMBOL_MAP, open_positions, blocked, cooldowns))
@@ -390,6 +458,7 @@ def main():
             coin = result["hl_coin"]
             if result["action"] == "close":
                 owned_coins.discard(coin)
+                opened_at.pop(coin, None)
                 pyramid_state.pop(coin, None)
                 peaks.pop(coin, None)
                 profit_protection.register_stopout(
@@ -401,6 +470,7 @@ def main():
                 pyramid_state[coin] = pyramid_state.get(coin, 0) + 1
             else:
                 owned_coins.add(coin)
+                opened_at[coin] = dt.datetime.now(dt.UTC).replace(tzinfo=None).isoformat()
                 pyramid_state[coin] = 0
 
     history = state.get("history", [])
@@ -416,6 +486,9 @@ def main():
     state["pyramid_state"] = pyramid_state
     state["peaks"] = {c: v for c, v in peaks.items() if c in owned_coins}
     state["protect_block"] = blocked
+    state["opened_at"] = {c: t for c, t in opened_at.items() if c in owned_coins}
+    if slow:
+        state["slow_bars"] = {t: s.get("bar_ts") for t, s in signals.items() if s.get("bar_ts")}
     state["cooldowns"] = profit_protection.active_cooldowns(cooldowns)
     latest = get_open_positions(info, address)
     state["open_positions"] = {c: p for c, p in latest.items() if c in owned_coins}
