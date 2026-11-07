@@ -1,0 +1,46 @@
+name: Backtest Position Cap
+
+# Manual only. Position cap check: slow mode with different max-position limits on ~100 days of Hyperliquid 30-min
+# candles and compares rule changes. Places no orders and uses no secrets.
+# Results are committed to the `backtest-results-maxpos` branch (results/report.md).
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run replay
+        run: python backtest_maxpos.py --out results
+
+      - name: Job summary
+        run: cat results/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results-maxpos
+          path: results/
+
+      - name: Commit results to backtest-results-maxpos branch
+        run: |
+          git config user.name "backtest-bot"
+          git config user.email "backtest-bot@users.noreply.github.com"
+          git checkout --orphan backtest-results-maxpos
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          git add -f results
+          git commit -m "Backtest results $(date -u +%Y-%m-%d_%H%M)"
+          git push --force origin backtest-results-maxpos
