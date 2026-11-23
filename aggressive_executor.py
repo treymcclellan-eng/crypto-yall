@@ -50,6 +50,13 @@ POSITION_SIZE_PCT = 0.015  # 1.5% per trade — higher than standard intraday
 LARGE_CAP_SIZE_MULT = float(os.environ.get("AGGRESSIVE_LARGE_CAP_SIZE_MULT") or 0.5)
 PYRAMID_SIZE_PCT = 0.005   # 0.5% extra per pyramid add (max 2 adds)
 
+# Coins the AGGRESSIVE bot must not trade (comma-separated HL symbols, e.g. "VVV").
+# Default empty = no change. Only affects this bot; daily/intraday are untouched.
+# NOTE: close any open aggressive position in an excluded coin first, because the
+# bot stops managing (and stopping out) a coin once it is excluded.
+EXCLUDE_COINS = {c.strip().upper() for c in (os.environ.get("AGGRESSIVE_EXCLUDE") or "").split(",") if c.strip()}
+AGG_ASSETS = {t: n for t, n in ASSETS.items() if HL_SYMBOL_MAP.get(t, "").upper() not in EXCLUDE_COINS}
+
 
 # ── State persistence (separate Gist) ───────────────────────────────────────
 
@@ -96,12 +103,12 @@ def compute_aggressive_signals(state: dict | None = None) -> dict:
     bars instead; see slow_mode.py.
     """
     slow = slow_mode.settings() if slow_mode.enabled() else None
-    all_data = fetch_all_intraday(list(ASSETS.keys()), interval="30m",
+    all_data = fetch_all_intraday(list(AGG_ASSETS.keys()), interval="30m",
                                   lookback_hours=1000 if slow is None else 1400)
     last_seen = (state or {}).get("slow_bars", {})
     current = {}
 
-    for ticker in ASSETS:
+    for ticker in AGG_ASSETS:
         try:
             df = all_data.get(ticker)
             if df is None or df.empty or len(df) < 50:
@@ -393,7 +400,7 @@ def main():
     mids = info.all_mids()
     available = set(mids.keys())
     signals = {t: s for t, s in signals.items() if HL_SYMBOL_MAP[t] in available}
-    skipped = [t for t in ASSETS if t not in signals]
+    skipped = [t for t in AGG_ASSETS if t not in signals]
     if skipped:
         print(f"Skipping unavailable assets on this env: {skipped}")
 
